@@ -1,130 +1,213 @@
 import { useRef, useState } from "react";
 
-type BarcodeFormat =
-  | "ean_13"
-  | "ean_8"
-  | "upc_a"
-  | "upc_e"
-  | "code_128"
-  | "qr_code"
-  | "data_matrix";
-
 export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-
   const streamRef = useRef<MediaStream | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const trackRef = useRef<MediaStreamTrack | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
 
+  // debug
+  const [hasBD, setHasBD] = useState(false);
+  const [supported, setSupported] = useState<string>("-");
+  const [ticks, setTicks] = useState(0);
+  const [lastMs, setLastMs] = useState(0);
+
+  // zoom/torch UI
+  const [zoom, setZoom] = useState<number>(1);
+  const [zoomMax, setZoomMax] = useState<number>(1);
+  const [torch, setTorch] = useState<boolean>(false);
+  const [torchSupported, setTorchSupported] = useState<boolean>(false);
+  const [zoomSupported, setZoomSupported] = useState<boolean>(false);
+
   const stopScanner = () => {
-    // stop loop
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
+    if (timerRef.current) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
     }
 
-    // stop camera tracks
+    try {
+      trackRef.current?.stop?.();
+    } catch {}
+
     try {
       streamRef.current?.getTracks()?.forEach((t) => t.stop());
-    } catch (e) {}
+    } catch {}
 
     streamRef.current = null;
+    trackRef.current = null;
 
-    // clear video
     try {
-      if (videoRef.current) {
-        (videoRef.current as any).srcObject = null;
-      }
-    } catch (e) {}
+      if (videoRef.current) (videoRef.current as any).srcObject = null;
+    } catch {}
 
     setIsRunning(false);
+  };
+
+  const applyZoom = async (z: number) => {
+    const track = trackRef.current;
+    if (!track) return;
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: z }] as any });
+    } catch {}
+  };
+
+  const applyTorch = async (on: boolean) => {
+    const track = trackRef.current;
+    if (!track) return;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: on }] as any });
+    } catch {}
   };
 
   const startScanner = async () => {
     try {
       setError(null);
+      setTicks(0);
+      setLastMs(0);
 
       if (!window.isSecureContext) {
-        setError(
-          "La fotocamera richiede HTTPS (lucchetto). Apri dal link https:// in Chrome (non browser interni)."
-        );
+        setError("Serve HTTPS (lucchetto). Apri dal link https:// in Chrome.");
         return;
       }
-
       if (!navigator.mediaDevices?.getUserMedia) {
-        setError("Fotocamera non disponibile in questo browser. Apri in Google Chrome.");
+        setError("getUserMedia non disponibile: apri in Google Chrome.");
         return;
       }
 
-      // BarcodeDetector (Chrome Android) - super stabile
       const BD = (window as any).BarcodeDetector;
+      setHasBD(!!BD);
       if (!BD) {
-        setError(
-          "BarcodeDetector non disponibile su questo browser. Apri con Chrome aggiornato."
-        );
+        setError("BarcodeDetector non disponibile. Aggiorna Chrome.");
         return;
+      }
+
+      // supported formats (debug)
+      try {
+        const s = await BD.getSupportedFormats?.();
+        if (Array.isArray(s)) setSupported(s.join(", "));
+        else setSupported("(non disponibile)");
+      } catch {
+        setSupported("(non disponibile)");
       }
 
       if (!videoRef.current) return;
 
       stopScanner();
 
-      const constraints: MediaStreamConstraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
         audio: false,
-      };
+      });
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+      const track = stream.getVideoTracks()[0];
+      trackRef.current = track;
+
+      // capabilities for zoom/torch
+      try {
+        const caps: any = (track as any).getCapabilities?.() || {};
+        const z = caps.zoom;
+        const t = caps.torch;
+
+        if (z && typeof z.max === "number") {
+          setZoomSupported(true);
+          setZoomMax(z.max);
+          const startZoom = Math.min(2, z.max); // zoom iniziale (aiuta molto)
+          setZoom(startZoom);
+          await applyZoom(startZoom);
+        } else {
+          setZoomSupported(false);
+          setZoomMax(1);
+          setZoom(1);
+        }
+
+        if (t === true) {
+          setTorchSupported(true);
+        } else {
+          setTorchSupported(false);
+          setTorch(false);
+        }
+      } catch {
+        setZoomSupported(false);
+        setTorchSupported(false);
+      }
 
       (videoRef.current as any).srcObject = stream;
+
+      await new Promise<void>((resolve) => {
+        const v = videoRef.current!;
+        if (v.readyState >= 2) return resolve();
+        v.onloadedmetadata = () => resolve();
+      });
+
       await videoRef.current.play();
 
-      const formats: BarcodeFormat[] = [
-        "ean_13",
-        "ean_8",
-        "upc_a",
-        "upc_e",
-        "code_128",
-        "qr_code",
-        "data_matrix",
-      ];
-
-      const detector = new BD({ formats });
+      // Detector
+      const detector = new BD();
 
       setIsRunning(true);
 
-      const scanLoop = async () => {
-        if (!videoRef.current || !streamRef.current) return;
+      // loop: usa canvas crop centrale (migliora tanto i barcode 1D)
+      timerRef.current = window.setInterval(async () => {
+        if (!videoRef.current) return;
+
+        const t0 = performance.now();
 
         try {
-          const barcodes = await detector.detect(videoRef.current);
-          if (barcodes && barcodes.length > 0) {
-            const raw = barcodes[0]?.rawValue;
+          const v = videoRef.current;
+
+          // prepara canvas
+          const canvas = canvasRef.current!;
+          const vw = v.videoWidth || 0;
+          const vh = v.videoHeight || 0;
+          if (!vw || !vh) return;
+
+          // crop centrale: 70% larghezza, 35% altezza (barra centrale barcode)
+          const cropW = Math.floor(vw * 0.7);
+          const cropH = Math.floor(vh * 0.35);
+          const sx = Math.floor((vw - cropW) / 2);
+          const sy = Math.floor((vh - cropH) / 2);
+
+          canvas.width = cropW;
+          canvas.height = cropH;
+
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+
+          ctx.drawImage(v, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
+
+          const results = await detector.detect(canvas);
+
+          const dt = performance.now() - t0;
+          setLastMs(Math.round(dt));
+          setTicks((x) => x + 1);
+
+          if (results && results.length > 0) {
+            const raw = results[0]?.rawValue;
             if (raw) {
               try {
                 navigator.vibrate?.(60);
-              } catch (e) {}
-
+              } catch {}
               stopScanner();
               onCode(raw);
-              return;
             }
           }
         } catch (e: any) {
-          // Alcuni device possono lanciare errori intermittenti; non fermiamo subito
+          const dt = performance.now() - t0;
+          setLastMs(Math.round(dt));
+          setTicks((x) => x + 1);
+          // non blocchiamo: errori sporadici possono capitare
         }
-
-        rafRef.current = requestAnimationFrame(scanLoop);
-      };
-
-      rafRef.current = requestAnimationFrame(scanLoop);
+      }, 180);
     } catch (e: any) {
       setError(e?.message ?? "Errore avvio scanner");
       stopScanner();
@@ -133,6 +216,27 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
   return (
     <div>
+      {/* DEBUG always visible (così capiamo subito cosa succede) */}
+      <div
+        style={{
+          marginBottom: 10,
+          padding: 10,
+          borderRadius: 10,
+          border: "1px solid var(--border)",
+          background: "#fff",
+          fontSize: 12,
+          color: "var(--text)",
+        }}
+      >
+        <div style={{ fontWeight: 800 }}>DEBUG</div>
+        <div>BarcodeDetector: {hasBD ? "SI" : "NO"}</div>
+        <div>Formati: {supported}</div>
+        <div>Tick: {ticks} — detect: {lastMs}ms</div>
+        <div style={{ color: "var(--muted)" }}>
+          Tip: prova EAN grande (antizanzare) e tieni fermo 1–2 secondi.
+        </div>
+      </div>
+
       {error && (
         <div
           style={{
@@ -152,6 +256,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
       <div
         style={{
+          position: "relative",
           border: "1px solid var(--border)",
           borderRadius: 12,
           overflow: "hidden",
@@ -165,9 +270,26 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           playsInline
           autoPlay
         />
+
+        {/* Reticolo / area target */}
+        <div
+          style={{
+            position: "absolute",
+            left: "15%",
+            top: "32%",
+            width: "70%",
+            height: "36%",
+            border: "2px dashed rgba(255,255,255,0.75)",
+            borderRadius: 10,
+            pointerEvents: "none",
+          }}
+        />
       </div>
 
-      <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+      {/* Canvas nascosto usato per crop */}
+      <canvas ref={canvasRef} style={{ display: "none" }} />
+
+      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
         {!isRunning ? (
           <button
             onClick={startScanner}
@@ -176,7 +298,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
               padding: 12,
               borderRadius: 12,
               border: "2px solid var(--primary)",
-              background: "#ffffff",
+              background: "#fff",
               color: "var(--primary)",
               fontWeight: 700,
               fontSize: 16,
@@ -193,7 +315,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
               padding: 12,
               borderRadius: 12,
               border: "1px solid var(--border)",
-              background: "#ffffff",
+              background: "#fff",
               color: "var(--text)",
               fontWeight: 700,
               fontSize: 16,
@@ -204,10 +326,56 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           </button>
         )}
 
-        {isRunning && (
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>
-            Scanner attivo: inquadra il codice e mantieni fermo 1–2 secondi.
+        {/* Zoom */}
+        {zoomSupported && isRunning && (
+          <div
+            style={{
+              padding: 10,
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              background: "#fff",
+            }}
+          >
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+              Zoom (aiuta molto sui barcode piccoli)
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={Math.max(1, Math.floor(zoomMax))}
+              step={1}
+              value={zoom}
+              onChange={async (e) => {
+                const z = Number(e.target.value);
+                setZoom(z);
+                await applyZoom(z);
+              }}
+            />
           </div>
+        )}
+
+        {/* Torch */}
+        {torchSupported && isRunning && (
+          <button
+            onClick={async () => {
+              const next = !torch;
+              setTorch(next);
+              await applyTorch(next);
+            }}
+            style={{
+              width: "100%",
+              padding: 12,
+              borderRadius: 12,
+              border: "1px solid var(--border)",
+              background: "#fff",
+              color: "var(--text)",
+              fontWeight: 700,
+              fontSize: 16,
+              cursor: "pointer",
+            }}
+          >
+            {torch ? "Spegni torcia" : "Accendi torcia"}
+          </button>
         )}
       </div>
     </div>
