@@ -79,7 +79,18 @@ export default function App() {
       <h1 style={{ marginBottom: 16, fontWeight: 800, color: "var(--primary)" }}>
         Scanner codici a barre
       </h1>
-
+<div
+  style={{
+    marginBottom: 12,
+    padding: 10,
+    border: "2px dashed red",
+    borderRadius: 12,
+    background: "#fff",
+    fontWeight: 900,
+  }}
+>
+  VERSIONE APP: 99
+</div>
       {/* Scanner */}
       <ScannerView onCode={handleCode} />
 
