@@ -1,0 +1,48 @@
+:root {
+  /* Sfondo */
+  --bg: #ffffff;
+  --card: #ffffff;
+
+  /* Testi */
+  --text: #1f2937;
+  --muted: #6b7280;
+
+  /* Verde farmacia (stile ACC) */
+  --primary: #16a34a;
+  --primary-2: #22c55e;
+
+  /* Stati */
+  --danger: #ef4444;
+  --border: #e5e7eb;
+
+  --radius: 14px;
+  --shadow: 0 4px 14px rgba(0,0,0,0.08);
+}
+
+/* Base */
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+/* Input (servirà dopo) */
+input, select {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--text);
+  font-size: 16px;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
