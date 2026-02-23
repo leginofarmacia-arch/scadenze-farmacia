@@ -17,7 +17,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const [ticks, setTicks] = useState(0);
   const [lastMs, setLastMs] = useState(0);
 
-  // zoom/torch UI
+  // zoom/torch
   const [zoom, setZoom] = useState<number>(1);
   const [zoomMax, setZoomMax] = useState<number>(1);
   const [torch, setTorch] = useState<boolean>(false);
@@ -121,7 +121,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         if (z && typeof z.max === "number") {
           setZoomSupported(true);
           setZoomMax(z.max);
-          const startZoom = Math.min(2, z.max); // zoom iniziale (aiuta molto)
+          const startZoom = Math.min(2, z.max); // zoom iniziale utile
           setZoom(startZoom);
           await applyZoom(startZoom);
         } else {
@@ -151,12 +151,21 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
       await videoRef.current.play();
 
-      // Detector
+      // Detector (non forziamo i formats: usiamo quelli supportati dal device)
       const detector = new BD();
 
       setIsRunning(true);
 
-      // loop: usa canvas crop centrale (migliora tanto i barcode 1D)
+      // ✅ Accettiamo SOLO questi formati, per evitare codici "strani" (es. code_39/codabar)
+      const allowedFormats = new Set([
+        "ean_13",
+        "ean_8",
+        "upc_a",
+        "upc_e",
+        "code_128",
+      ]);
+
+      // loop con canvas crop centrale
       timerRef.current = window.setInterval(async () => {
         if (!videoRef.current) return;
 
@@ -165,13 +174,12 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         try {
           const v = videoRef.current;
 
-          // prepara canvas
           const canvas = canvasRef.current!;
           const vw = v.videoWidth || 0;
           const vh = v.videoHeight || 0;
           if (!vw || !vh) return;
 
-          // crop centrale: 70% larghezza, 35% altezza (barra centrale barcode)
+          // crop centrale: ottimo per barcode 1D
           const cropW = Math.floor(vw * 0.7);
           const cropH = Math.floor(vh * 0.35);
           const sx = Math.floor((vw - cropW) / 2);
@@ -192,20 +200,40 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           setTicks((x) => x + 1);
 
           if (results && results.length > 0) {
-            const raw = results[0]?.rawValue;
+            const r = results[0] as any;
+            const raw: string | undefined = r?.rawValue;
+            const fmt: string | undefined = r?.format;
+
+            // ✅ filtro formato
+            if (fmt && !allowedFormats.has(fmt)) {
+              return;
+            }
+
+            // ✅ filtro contenuto: accettiamo solo codici "numerici" (tipico EAN/UPC)
+            // (Code128 può essere alfanumerico, ma in farmacia spesso EAN è numerico)
             if (raw) {
+              const cleaned = raw.replace(/\s+/g, "");
+
+              // Se è numerico 8-14 cifre, ok (EAN8/EAN13/UPC)
+              const isNumeric = /^\d{8,14}$/.test(cleaned);
+
+              // Permettiamo anche code_128 ma solo se abbastanza "lungo" (evita "X5YR")
+              const isOkCode128 = fmt === "code_128" && cleaned.length >= 8;
+
+              if (!isNumeric && !isOkCode128) return;
+
               try {
                 navigator.vibrate?.(60);
               } catch {}
+
               stopScanner();
-              onCode(raw);
+              onCode(cleaned);
             }
           }
-        } catch (e: any) {
+        } catch {
           const dt = performance.now() - t0;
           setLastMs(Math.round(dt));
           setTicks((x) => x + 1);
-          // non blocchiamo: errori sporadici possono capitare
         }
       }, 180);
     } catch (e: any) {
@@ -216,7 +244,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
   return (
     <div>
-      {/* DEBUG always visible (così capiamo subito cosa succede) */}
+      {/* DEBUG */}
       <div
         style={{
           marginBottom: 10,
@@ -231,9 +259,11 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         <div style={{ fontWeight: 800 }}>DEBUG</div>
         <div>BarcodeDetector: {hasBD ? "SI" : "NO"}</div>
         <div>Formati: {supported}</div>
-        <div>Tick: {ticks} — detect: {lastMs}ms</div>
+        <div>
+          Tick: {ticks} — detect: {lastMs}ms
+        </div>
         <div style={{ color: "var(--muted)" }}>
-          Tip: prova EAN grande (antizanzare) e tieni fermo 1–2 secondi.
+          Nota: ora ignoro code_39/codabar ecc. (per evitare codici tipo “X5Y R”).
         </div>
       </div>
 
@@ -271,7 +301,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           autoPlay
         />
 
-        {/* Reticolo / area target */}
+        {/* Reticolo */}
         <div
           style={{
             position: "absolute",
@@ -286,7 +316,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         />
       </div>
 
-      {/* Canvas nascosto usato per crop */}
+      {/* Canvas nascosto per crop */}
       <canvas ref={canvasRef} style={{ display: "none" }} />
 
       <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
@@ -337,7 +367,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
             }}
           >
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
-              Zoom (aiuta molto sui barcode piccoli)
+              Zoom (aiuta sui barcode piccoli)
             </div>
             <input
               type="range"
