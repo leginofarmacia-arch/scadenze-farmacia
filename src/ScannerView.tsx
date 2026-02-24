@@ -14,6 +14,9 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
 
+  // ✅ ref per evitare problemi di stato "stale" nel callback
+  const candidateRef = useRef<string | null>(null);
+
   // stabilizzazione
   const lastReadRef = useRef<string>("");
   const stableCountRef = useRef<number>(0);
@@ -21,8 +24,8 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // UI “pistola”
-  const [candidate, setCandidate] = useState<string | null>(null); // codice proposto
+  // UI
+  const [candidate, setCandidate] = useState<string | null>(null);
   const [lastFmt, setLastFmt] = useState<string>("-");
   const [ticks, setTicks] = useState(0);
 
@@ -48,6 +51,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       setTicks(0);
       setLastFmt("-");
       setCandidate(null);
+      candidateRef.current = null;
 
       lastReadRef.current = "";
       stableCountRef.current = 0;
@@ -62,11 +66,9 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       }
       if (!videoRef.current) return;
 
-      // stop eventuale sessione precedente
       stopScanner();
 
-      // ✅ SOLO codici LINEARI (universale per negozio/farmacia)
-      // (evitiamo DataMatrix/QR che rubano la lettura)
+      // ✅ SOLO formati LINEARI (universale negozio/farmacia)
       const hints = new Map();
       hints.set(DecodeHintType.POSSIBLE_FORMATS, [
         BarcodeFormat.EAN_13,
@@ -100,33 +102,33 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         (result, err) => {
           setTicks((t) => t + 1);
 
-          // se abbiamo già un candidate, non aggiorniamo più finché non riprendi
-          if (candidate) return;
+          // ✅ se abbiamo già un candidate "bloccato", non accettiamo altri
+          if (candidateRef.current) return;
 
           if (result) {
             const text = norm(result.getText?.() ?? "");
             const fmt = result.getBarcodeFormat?.();
             setLastFmt(String(fmt ?? "-"));
 
-            // anti-rumore
+            // anti rumore
             if (!text || text.length < 6) return;
             if (!isSimpleAlphaNum(text)) return;
 
-            // ✅ stabilizzazione: lo stesso codice deve arrivare 2 volte
-            if (text === lastReadRef.current) {
-              stableCountRef.current += 1;
-            } else {
+            // stabilizzazione: stesso codice 2 volte
+            if (text === lastReadRef.current) stableCountRef.current += 1;
+            else {
               lastReadRef.current = text;
               stableCountRef.current = 1;
             }
 
             if (stableCountRef.current >= 2) {
-              // “lock” del codice: lo proponiamo e fermiamo lo scanner
+              candidateRef.current = text; // ✅ lock
+              setCandidate(text);
+
               try {
                 navigator.vibrate?.(60);
               } catch {}
 
-              setCandidate(text);
               stopScanner();
             }
 
@@ -147,12 +149,13 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   };
 
   const confirm = () => {
-    if (!candidate) return;
-    onCode(candidate);
+    if (!candidateRef.current) return;
+    onCode(candidateRef.current);
   };
 
   const resume = () => {
     setCandidate(null);
+    candidateRef.current = null;
     lastReadRef.current = "";
     stableCountRef.current = 0;
     startScanner();
@@ -160,7 +163,6 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
   return (
     <div>
-      {/* INFO/DEBUG leggero */}
       <div
         style={{
           marginBottom: 10,
@@ -172,9 +174,9 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           color: "var(--text)",
         }}
       >
-        <div style={{ fontWeight: 800 }}>Scanner (modalità conferma)</div>
+        <div style={{ fontWeight: 800 }}>Scanner (conferma manuale)</div>
         <div style={{ color: "var(--muted)" }}>
-          Metti il codice nel riquadro e tieni fermo 1–2 sec. Poi premi “Conferma”.
+          Metti il barcode nel riquadro e tieni fermo 1–2 secondi.
         </div>
         <div style={{ marginTop: 6, color: "var(--muted)" }}>
           Tick: {ticks} — last fmt: {lastFmt}
@@ -191,14 +193,12 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
             background: "#fff",
             color: "var(--danger)",
             fontSize: 13,
-            lineHeight: 1.3,
           }}
         >
           {error}
         </div>
       )}
 
-      {/* Camera + mirino */}
       <div
         style={{
           position: "relative",
@@ -216,7 +216,6 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           autoPlay
         />
 
-        {/* mirino */}
         <div
           style={{
             position: "absolute",
@@ -232,7 +231,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       </div>
 
       <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-        {!isRunning && !candidate && (
+        {!isRunning ? (
           <button
             onClick={startScanner}
             style={{
@@ -242,16 +241,14 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
               border: "2px solid var(--primary)",
               background: "#fff",
               color: "var(--primary)",
-              fontWeight: 700,
+              fontWeight: 800,
               fontSize: 16,
               cursor: "pointer",
             }}
           >
             Avvia scanner
           </button>
-        )}
-
-        {isRunning && (
+        ) : (
           <button
             onClick={stopScanner}
             style={{
@@ -261,7 +258,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
               border: "1px solid var(--border)",
               background: "#fff",
               color: "var(--text)",
-              fontWeight: 700,
+              fontWeight: 800,
               fontSize: 16,
               cursor: "pointer",
             }}
@@ -270,63 +267,64 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           </button>
         )}
 
-        {/* candidato */}
-        {candidate && (
-          <div
-            style={{
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid var(--border)",
-              background: "#fff",
-            }}
-          >
-            <div style={{ fontWeight: 800, color: "var(--primary)" }}>
-              Codice rilevato
-            </div>
-            <div style={{ fontSize: 22, fontWeight: 900, marginTop: 6 }}>
-              {candidate}
-            </div>
-            <div style={{ color: "var(--muted)", marginTop: 4 }}>
-              Se non è quello giusto, premi “Riprendi scansione”.
-            </div>
-
-            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-              <button
-                onClick={confirm}
-                style={{
-                  width: "100%",
-                  padding: 12,
-                  borderRadius: 12,
-                  border: "2px solid var(--primary)",
-                  background: "var(--primary)",
-                  color: "#fff",
-                  fontWeight: 800,
-                  fontSize: 16,
-                  cursor: "pointer",
-                }}
-              >
-                Conferma codice
-              </button>
-
-              <button
-                onClick={resume}
-                style={{
-                  width: "100%",
-                  padding: 12,
-                  borderRadius: 12,
-                  border: "2px solid var(--primary)",
-                  background: "#fff",
-                  color: "var(--primary)",
-                  fontWeight: 800,
-                  fontSize: 16,
-                  cursor: "pointer",
-                }}
-              >
-                Riprendi scansione
-              </button>
-            </div>
+        {/* ✅ sezione conferma SEMPRE visibile */}
+        <div
+          style={{
+            padding: 12,
+            borderRadius: 12,
+            border: "1px solid var(--border)",
+            background: "#fff",
+          }}
+        >
+          <div style={{ fontWeight: 800, color: "var(--primary)" }}>
+            Codice rilevato
           </div>
-        )}
+
+          <div style={{ fontSize: 22, fontWeight: 900, marginTop: 6 }}>
+            {candidate ?? "—"}
+          </div>
+
+          <div style={{ color: "var(--muted)", marginTop: 6 }}>
+            Premi “Conferma” solo quando sei sicuro che è quello giusto.
+          </div>
+
+          <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+            <button
+              onClick={confirm}
+              disabled={!candidate}
+              style={{
+                width: "100%",
+                padding: 12,
+                borderRadius: 12,
+                border: "2px solid var(--primary)",
+                background: candidate ? "var(--primary)" : "#e9ecef",
+                color: candidate ? "#fff" : "#777",
+                fontWeight: 900,
+                fontSize: 16,
+                cursor: candidate ? "pointer" : "not-allowed",
+              }}
+            >
+              Conferma codice
+            </button>
+
+            <button
+              onClick={resume}
+              style={{
+                width: "100%",
+                padding: 12,
+                borderRadius: 12,
+                border: "2px solid var(--primary)",
+                background: "#fff",
+                color: "var(--primary)",
+                fontWeight: 900,
+                fontSize: 16,
+                cursor: "pointer",
+              }}
+            >
+              Riprendi scansione
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
