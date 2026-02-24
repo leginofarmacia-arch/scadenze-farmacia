@@ -6,8 +6,6 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const trackRef = useRef<MediaStreamTrack | null>(null);
   const timerRef = useRef<number | null>(null);
 
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
 
@@ -15,29 +13,25 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const [hasBD, setHasBD] = useState(false);
   const [supported, setSupported] = useState<string>("-");
   const [ticks, setTicks] = useState(0);
-  const [lastMs, setLastMs] = useState(0);
+  const [lastCount, setLastCount] = useState(0);
+  const [lastFmt, setLastFmt] = useState<string>("-");
+  const [lastRaw, setLastRaw] = useState<string>("-");
 
   // zoom/torch
   const [zoom, setZoom] = useState<number>(1);
   const [zoomMax, setZoomMax] = useState<number>(1);
-  const [torch, setTorch] = useState<boolean>(false);
-  const [torchSupported, setTorchSupported] = useState<boolean>(false);
-  const [zoomSupported, setZoomSupported] = useState<boolean>(false);
+  const [torch, setTorch] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [zoomSupported, setZoomSupported] = useState(false);
 
   const stopScanner = () => {
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
     }
-
     try {
-      trackRef.current?.stop?.();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
     } catch {}
-
-    try {
-      streamRef.current?.getTracks()?.forEach((t) => t.stop());
-    } catch {}
-
     streamRef.current = null;
     trackRef.current = null;
 
@@ -49,18 +43,18 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   };
 
   const applyZoom = async (z: number) => {
-    const track = trackRef.current;
-    if (!track) return;
+    const track = trackRef.current as any;
+    if (!track?.applyConstraints) return;
     try {
-      await track.applyConstraints({ advanced: [{ zoom: z }] as any });
+      await track.applyConstraints({ advanced: [{ zoom: z }] });
     } catch {}
   };
 
   const applyTorch = async (on: boolean) => {
-    const track = trackRef.current;
-    if (!track) return;
+    const track = trackRef.current as any;
+    if (!track?.applyConstraints) return;
     try {
-      await track.applyConstraints({ advanced: [{ torch: on }] as any });
+      await track.applyConstraints({ advanced: [{ torch: on }] });
     } catch {}
   };
 
@@ -68,31 +62,24 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
     try {
       setError(null);
       setTicks(0);
-      setLastMs(0);
+      setLastCount(0);
+      setLastFmt("-");
+      setLastRaw("-");
 
       if (!window.isSecureContext) {
-        setError("Serve HTTPS (lucchetto). Apri dal link https:// in Chrome.");
+        setError("Serve HTTPS (lucchetto).");
         return;
       }
       if (!navigator.mediaDevices?.getUserMedia) {
-        setError("getUserMedia non disponibile: apri in Google Chrome.");
+        setError("getUserMedia non disponibile (apri in Chrome).");
         return;
       }
 
       const BD = (window as any).BarcodeDetector;
       setHasBD(!!BD);
       if (!BD) {
-        setError("BarcodeDetector non disponibile. Aggiorna Chrome.");
+        setError("BarcodeDetector non disponibile su questo browser.");
         return;
-      }
-
-      // supported formats (debug)
-      try {
-        const s = await BD.getSupportedFormats?.();
-        if (Array.isArray(s)) setSupported(s.join(", "));
-        else setSupported("(non disponibile)");
-      } catch {
-        setSupported("(non disponibile)");
       }
 
       if (!videoRef.current) return;
@@ -109,28 +96,24 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       });
 
       streamRef.current = stream;
-      const track = stream.getVideoTracks()[0];
-      trackRef.current = track;
+      trackRef.current = stream.getVideoTracks()[0];
 
-      // capabilities for zoom/torch
+      // zoom/torch support
       try {
-        const caps: any = (track as any).getCapabilities?.() || {};
-        const z = caps.zoom;
-        const t = caps.torch;
-
-        if (z && typeof z.max === "number") {
+        const track: any = trackRef.current;
+        const caps: any = track.getCapabilities?.() ?? {};
+        if (caps?.zoom?.max) {
           setZoomSupported(true);
-          setZoomMax(z.max);
-          const startZoom = Math.min(2, z.max); // zoom iniziale utile
-          setZoom(startZoom);
-          await applyZoom(startZoom);
+          setZoomMax(caps.zoom.max);
+          const startZ = Math.min(2, caps.zoom.max);
+          setZoom(startZ);
+          await applyZoom(startZ);
         } else {
           setZoomSupported(false);
           setZoomMax(1);
           setZoom(1);
         }
-
-        if (t === true) {
+        if (caps?.torch) {
           setTorchSupported(true);
         } else {
           setTorchSupported(false);
@@ -151,91 +134,58 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
       await videoRef.current.play();
 
-      // Detector (non forziamo i formats: usiamo quelli supportati dal device)
-      const detector = new BD();
+      // ✅ prendo i formati realmente supportati dal device
+      let supportedArr: string[] = [];
+      try {
+        supportedArr = (await BD.getSupportedFormats?.()) ?? [];
+      } catch {
+        supportedArr = [];
+      }
+
+      setSupported(supportedArr.length ? supportedArr.join(", ") : "(non disponibile)");
+
+      // formati desiderati per farmacia
+      const desired = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "qr_code", "data_matrix"];
+
+      // ✅ intersezione: solo quelli che il device supporta davvero
+      const formatsToUse =
+        supportedArr.length > 0 ? desired.filter((f) => supportedArr.includes(f)) : [];
+
+      const detector =
+        formatsToUse.length > 0 ? new BD({ formats: formatsToUse }) : new BD();
 
       setIsRunning(true);
 
-      // ✅ Accettiamo SOLO questi formati, per evitare codici "strani" (es. code_39/codabar)
-      const allowedFormats = new Set([
-        "ean_13",
-        "ean_8",
-        "upc_a",
-        "upc_e",
-        "code_128",
-      ]);
-
-      // loop con canvas crop centrale
       timerRef.current = window.setInterval(async () => {
         if (!videoRef.current) return;
 
-        const t0 = performance.now();
-
         try {
-          const v = videoRef.current;
-
-          const canvas = canvasRef.current!;
-          const vw = v.videoWidth || 0;
-          const vh = v.videoHeight || 0;
-          if (!vw || !vh) return;
-
-          // crop centrale: ottimo per barcode 1D
-          const cropW = Math.floor(vw * 0.7);
-          const cropH = Math.floor(vh * 0.35);
-          const sx = Math.floor((vw - cropW) / 2);
-          const sy = Math.floor((vh - cropH) / 2);
-
-          canvas.width = cropW;
-          canvas.height = cropH;
-
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return;
-
-          ctx.drawImage(v, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
-
-          const results = await detector.detect(canvas);
-
-          const dt = performance.now() - t0;
-          setLastMs(Math.round(dt));
+          const results = await detector.detect(videoRef.current);
           setTicks((x) => x + 1);
+          setLastCount(results?.length ?? 0);
 
           if (results && results.length > 0) {
-            const r = results[0] as any;
-            const raw: string | undefined = r?.rawValue;
-            const fmt: string | undefined = r?.format;
+            const r: any = results[0];
+            const raw = (r.rawValue ?? "").toString().trim();
+            const fmt = (r.format ?? "-").toString();
 
-            // ✅ filtro formato
-            if (fmt && !allowedFormats.has(fmt)) {
-              return;
-            }
+            setLastFmt(fmt);
+            setLastRaw(raw || "(vuoto)");
 
-            // ✅ filtro contenuto: accettiamo solo codici "numerici" (tipico EAN/UPC)
-            // (Code128 può essere alfanumerico, ma in farmacia spesso EAN è numerico)
-            if (raw) {
-              const cleaned = raw.replace(/\s+/g, "");
+            if (!raw || raw.replace(/\s+/g, "").length < 6) return;
 
-              // Se è numerico 8-14 cifre, ok (EAN8/EAN13/UPC)
-              const isNumeric = /^\d{8,14}$/.test(cleaned);
+            try {
+              navigator.vibrate?.(60);
+            } catch {}
 
-              // Permettiamo anche code_128 ma solo se abbastanza "lungo" (evita "X5YR")
-              const isOkCode128 = fmt === "code_128" && cleaned.length >= 8;
-
-              if (!isNumeric && !isOkCode128) return;
-
-              try {
-                navigator.vibrate?.(60);
-              } catch {}
-
-              stopScanner();
-              onCode(cleaned);
-            }
+            stopScanner();
+            onCode(raw.replace(/\s+/g, ""));
           }
-        } catch {
-          const dt = performance.now() - t0;
-          setLastMs(Math.round(dt));
+        } catch (e: any) {
           setTicks((x) => x + 1);
+          // se vuoi vedere anche l'errore: setError(e?.message ?? "detect() errore");
         }
-      }, 180);
+      }, 200);
     } catch (e: any) {
       setError(e?.message ?? "Errore avvio scanner");
       stopScanner();
@@ -258,13 +208,10 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       >
         <div style={{ fontWeight: 800 }}>DEBUG</div>
         <div>BarcodeDetector: {hasBD ? "SI" : "NO"}</div>
-        <div>Formati: {supported}</div>
-        <div>
-          Tick: {ticks} — detect: {lastMs}ms
-        </div>
-        <div style={{ color: "var(--muted)" }}>
-          Nota: ora ignoro code_39/codabar ecc. (per evitare codici tipo “X5Y R”).
-        </div>
+        <div>Supported: {supported}</div>
+        <div>Tick: {ticks} | results: {lastCount}</div>
+        <div>Last fmt: {lastFmt}</div>
+        <div>Last raw: {lastRaw}</div>
       </div>
 
       {error && (
@@ -286,7 +233,6 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
       <div
         style={{
-          position: "relative",
           border: "1px solid var(--border)",
           borderRadius: 12,
           overflow: "hidden",
@@ -300,24 +246,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           playsInline
           autoPlay
         />
-
-        {/* Reticolo */}
-        <div
-          style={{
-            position: "absolute",
-            left: "15%",
-            top: "32%",
-            width: "70%",
-            height: "36%",
-            border: "2px dashed rgba(255,255,255,0.75)",
-            borderRadius: 10,
-            pointerEvents: "none",
-          }}
-        />
       </div>
-
-      {/* Canvas nascosto per crop */}
-      <canvas ref={canvasRef} style={{ display: "none" }} />
 
       <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
         {!isRunning ? (
@@ -356,7 +285,6 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           </button>
         )}
 
-        {/* Zoom */}
         {zoomSupported && isRunning && (
           <div
             style={{
@@ -367,7 +295,7 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
             }}
           >
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
-              Zoom (aiuta sui barcode piccoli)
+              Zoom
             </div>
             <input
               type="range"
@@ -384,7 +312,6 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           </div>
         )}
 
-        {/* Torch */}
         {torchSupported && isRunning && (
           <button
             onClick={async () => {
