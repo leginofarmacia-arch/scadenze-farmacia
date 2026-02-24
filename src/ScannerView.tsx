@@ -47,17 +47,12 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
 
       // Hints: priorità formati farmacia
       const hints = new Map();
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-        BarcodeFormat.EAN_13,
-        BarcodeFormat.EAN_8,
-        BarcodeFormat.UPC_A,
-        BarcodeFormat.UPC_E,
-        BarcodeFormat.CODE_128,
-        BarcodeFormat.ITF,
-        BarcodeFormat.QR_CODE,
-        BarcodeFormat.DATA_MATRIX,
-        BarcodeFormat.PDF_417,
-      ]);
+  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+]);
 
       const reader = new BrowserMultiFormatReader(hints, {
         delayBetweenScanAttempts: 100,
@@ -80,28 +75,34 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           setTicks((t) => t + 1);
 
           if (result) {
-            const text = result.getText()?.trim() ?? "";
-            const fmt = result.getBarcodeFormat?.();
+          const text = result.getText()?.trim() ?? "";
+const fmt = result.getBarcodeFormat?.();
 
-            setLastText(text || "-");
-            setLastFormat(String(fmt ?? "-"));
+setLastText(text || "-");
+setLastFormat(String(fmt ?? "-"));
 
-            const cleaned = text.replace(/\s+/g, "");
-            if (cleaned.length >= 6) {
-              try {
-                navigator.vibrate?.(60);
-              } catch {}
+const cleaned = text.replace(/\s+/g, "");
 
-              try {
-                controlsRef.current?.stop();
-              } catch {}
-              controlsRef.current = null;
+// ✅ Accetta SOLO codici prodotto: numerici 13 cifre (EAN-13)
+// (se vuoi anche UPC-A metti 12)
+const isEan13 = /^\d{13}$/.test(cleaned);
+const isUpcA = /^\d{12}$/.test(cleaned);
 
-              setIsRunning(false);
-              onCode(cleaned);
-            }
-            return;
+if (!isEan13 && !isUpcA) return;
+
+try {
+  navigator.vibrate?.(60);
+} catch {}
+
+try {
+  controlsRef.current?.stop();
+} catch {}
+controlsRef.current = null;
+
+setIsRunning(false);
+onCode(cleaned);
           }
+          
 
           // NotFoundException = normale quando non c'è un barcode nel frame
           if (err && !(err instanceof NotFoundException)) {
