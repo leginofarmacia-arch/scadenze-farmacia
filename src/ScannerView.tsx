@@ -2,17 +2,29 @@ import { useEffect, useRef, useState } from "react";
 import { BrowserMultiFormatReader, type IScannerControls } from "@zxing/browser";
 import { BarcodeFormat, DecodeHintType, NotFoundException } from "@zxing/library";
 
+type Seen = {
+  text: string;
+  format: string;
+  ts: number;
+};
+
+function norm(text: string) {
+  return (text ?? "").trim().replace(/\s+/g, "");
+}
+
 export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
+  const lastSeenAtRef = useRef<Record<string, number>>({});
 
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // debug
   const [ticks, setTicks] = useState(0);
-  const [lastText, setLastText] = useState<string>("-");
+  const [seen, setSeen] = useState<Seen[]>([]);
   const [lastFormat, setLastFormat] = useState<string>("-");
+  const [lastText, setLastText] = useState<string>("-");
 
   useEffect(() => {
     return () => {
@@ -26,8 +38,10 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
     try {
       setError(null);
       setTicks(0);
-      setLastText("-");
       setLastFormat("-");
+      setLastText("-");
+      setSeen([]);
+      lastSeenAtRef.current = {};
 
       if (!window.isSecureContext) {
         setError("Serve HTTPS (lucchetto).");
@@ -45,18 +59,23 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       } catch {}
       controlsRef.current = null;
 
-      // Hints: priorità formati farmacia
+      // Hints: farmacia (EAN/UPC/Code128 + DataMatrix)
       const hints = new Map();
-  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-  BarcodeFormat.EAN_13,
-  BarcodeFormat.EAN_8,
-  BarcodeFormat.UPC_A,
-  BarcodeFormat.UPC_E,
-]);
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.ITF,
+        BarcodeFormat.DATA_MATRIX,
+        BarcodeFormat.QR_CODE,
+        BarcodeFormat.PDF_417,
+      ]);
 
       const reader = new BrowserMultiFormatReader(hints, {
-        delayBetweenScanAttempts: 100,
-        delayBetweenScanSuccess: 600,
+        delayBetweenScanAttempts: 80,
+        delayBetweenScanSuccess: 250,
       });
 
       setIsRunning(true);
@@ -75,36 +94,34 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           setTicks((t) => t + 1);
 
           if (result) {
-          const text = result.getText()?.trim() ?? "";
-const fmt = result.getBarcodeFormat?.();
+            const raw = result.getText?.() ?? "";
+            const text = norm(raw);
+            const fmt = result.getBarcodeFormat?.();
 
-setLastText(text || "-");
-setLastFormat(String(fmt ?? "-"));
+            setLastText(text || "-");
+            setLastFormat(String(fmt ?? "-"));
 
-const cleaned = text.replace(/\s+/g, "");
+            // evita rumore
+            if (!text || text.length < 4) return;
 
-// ✅ Accetta SOLO codici prodotto: numerici 13 cifre (EAN-13)
-// (se vuoi anche UPC-A metti 12)
-const isEan13 = /^\d{13}$/.test(cleaned);
-const isUpcA = /^\d{12}$/.test(cleaned);
+            const key = `${fmt ?? "?"}:${text}`;
+            const now = Date.now();
+            const last = lastSeenAtRef.current[key] ?? 0;
 
-if (!isEan13 && !isUpcA) return;
+            // evita spam: stesso codice max 1 volta ogni 1.5s
+            if (now - last < 1500) return;
+            lastSeenAtRef.current[key] = now;
 
-try {
-  navigator.vibrate?.(60);
-} catch {}
+            setSeen((prev) => {
+              // evita duplicati in lista
+              if (prev.some((x) => x.format === String(fmt ?? "-") && x.text === text)) return prev;
+              return [{ text, format: String(fmt ?? "-"), ts: now }, ...prev].slice(0, 8);
+            });
 
-try {
-  controlsRef.current?.stop();
-} catch {}
-controlsRef.current = null;
-
-setIsRunning(false);
-onCode(cleaned);
+            return;
           }
-          
 
-          // NotFoundException = normale quando non c'è un barcode nel frame
+          // NotFoundException = normale quando non c'è barcode nel frame
           if (err && !(err instanceof NotFoundException)) {
             setError(err?.message ?? "Errore lettura barcode");
           }
@@ -130,6 +147,14 @@ onCode(cleaned);
     setIsRunning(false);
   };
 
+  const useCode = (code: string) => {
+    try {
+      navigator.vibrate?.(60);
+    } catch {}
+    stop();
+    onCode(code);
+  };
+
   return (
     <div>
       {/* DEBUG */}
@@ -148,6 +173,9 @@ onCode(cleaned);
         <div>Tick: {ticks}</div>
         <div>Ultimo formato: {lastFormat}</div>
         <div>Ultimo testo: {lastText}</div>
+        <div style={{ color: "var(--muted)" }}>
+          Tip: inquadra il codice rosso e tieni fermo 1–2 secondi.
+        </div>
       </div>
 
       {error && (
@@ -219,6 +247,76 @@ onCode(cleaned);
           >
             Ferma scanner
           </button>
+        )}
+
+        {seen.length > 0 && (
+          <div
+            style={{
+              padding: 12,
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              background: "#fff",
+            }}
+          >
+            <div style={{ fontWeight: 800, marginBottom: 8, color: "var(--primary)" }}>
+              Codici rilevati (tocca “Usa questo”)
+            </div>
+
+            {seen.map((s) => (
+              <div
+                key={`${s.format}:${s.text}`}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr auto",
+                  gap: 10,
+                  alignItems: "center",
+                  padding: "8px 0",
+                  borderTop: "1px solid var(--border)",
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 800 }}>{s.text}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)" }}>{s.format}</div>
+                </div>
+
+                <button
+                  onClick={() => useCode(s.text)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "2px solid var(--primary)",
+                    background: "#fff",
+                    color: "var(--primary)",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Usa questo
+                </button>
+              </div>
+            ))}
+
+            <button
+              onClick={() => {
+                setSeen([]);
+                lastSeenAtRef.current = {};
+              }}
+              style={{
+                marginTop: 10,
+                width: "100%",
+                padding: 10,
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "#fff",
+                color: "var(--text)",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Svuota lista
+            </button>
+          </div>
         )}
       </div>
     </div>
