@@ -6,17 +6,25 @@ function norm(text: string) {
   return (text ?? "").trim().replace(/\s+/g, "");
 }
 
+function isSimpleAlphaNum(s: string) {
+  return /^[A-Z0-9]+$/i.test(s);
+}
+
 export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
 
+  // stabilizzazione
+  const lastReadRef = useRef<string>("");
+  const stableCountRef = useRef<number>(0);
+
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // debug
+  // UI “pistola”
+  const [candidate, setCandidate] = useState<string | null>(null); // codice proposto
+  const [lastFmt, setLastFmt] = useState<string>("-");
   const [ticks, setTicks] = useState(0);
-  const [lastText, setLastText] = useState<string>("-");
-  const [lastFormat, setLastFormat] = useState<string>("-");
 
   useEffect(() => {
     return () => {
@@ -26,12 +34,23 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
     };
   }, []);
 
-  const start = async () => {
+  const stopScanner = () => {
+    try {
+      controlsRef.current?.stop();
+    } catch {}
+    controlsRef.current = null;
+    setIsRunning(false);
+  };
+
+  const startScanner = async () => {
     try {
       setError(null);
       setTicks(0);
-      setLastText("-");
-      setLastFormat("-");
+      setLastFmt("-");
+      setCandidate(null);
+
+      lastReadRef.current = "";
+      stableCountRef.current = 0;
 
       if (!window.isSecureContext) {
         setError("Serve HTTPS (lucchetto).");
@@ -43,13 +62,11 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       }
       if (!videoRef.current) return;
 
-      // stop sessione precedente
-      try {
-        controlsRef.current?.stop();
-      } catch {}
-      controlsRef.current = null;
+      // stop eventuale sessione precedente
+      stopScanner();
 
-      // ✅ SOLO formati LINEARI (cosmetici/OTC/parafarmaco)
+      // ✅ SOLO codici LINEARI (universale per negozio/farmacia)
+      // (evitiamo DataMatrix/QR che rubano la lettura)
       const hints = new Map();
       hints.set(DecodeHintType.POSSIBLE_FORMATS, [
         BarcodeFormat.EAN_13,
@@ -57,14 +74,15 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         BarcodeFormat.UPC_A,
         BarcodeFormat.UPC_E,
         BarcodeFormat.CODE_128,
-        BarcodeFormat.CODE_39,  // <- per codici tipo A979332400
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.CODE_93,
         BarcodeFormat.ITF,
         BarcodeFormat.CODABAR,
       ]);
 
       const reader = new BrowserMultiFormatReader(hints, {
-        delayBetweenScanAttempts: 80,
-        delayBetweenScanSuccess: 600,
+        delayBetweenScanAttempts: 60,
+        delayBetweenScanSuccess: 250,
       });
 
       setIsRunning(true);
@@ -82,29 +100,36 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         (result, err) => {
           setTicks((t) => t + 1);
 
+          // se abbiamo già un candidate, non aggiorniamo più finché non riprendi
+          if (candidate) return;
+
           if (result) {
             const text = norm(result.getText?.() ?? "");
             const fmt = result.getBarcodeFormat?.();
+            setLastFmt(String(fmt ?? "-"));
 
-            setLastText(text || "-");
-            setLastFormat(String(fmt ?? "-"));
-
+            // anti-rumore
             if (!text || text.length < 6) return;
+            if (!isSimpleAlphaNum(text)) return;
 
-            // accetta solo alfanumerico semplice (ok per A979332400)
-            if (!/^[A-Z0-9]+$/i.test(text)) return;
+            // ✅ stabilizzazione: lo stesso codice deve arrivare 2 volte
+            if (text === lastReadRef.current) {
+              stableCountRef.current += 1;
+            } else {
+              lastReadRef.current = text;
+              stableCountRef.current = 1;
+            }
 
-            try {
-              navigator.vibrate?.(60);
-            } catch {}
+            if (stableCountRef.current >= 2) {
+              // “lock” del codice: lo proponiamo e fermiamo lo scanner
+              try {
+                navigator.vibrate?.(60);
+              } catch {}
 
-            try {
-              controlsRef.current?.stop();
-            } catch {}
-            controlsRef.current = null;
+              setCandidate(text);
+              stopScanner();
+            }
 
-            setIsRunning(false);
-            onCode(text);
             return;
           }
 
@@ -117,24 +142,25 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
       controlsRef.current = controls;
     } catch (e: any) {
       setError(e?.message ?? "Errore avvio scanner");
-      setIsRunning(false);
-      try {
-        controlsRef.current?.stop();
-      } catch {}
-      controlsRef.current = null;
+      stopScanner();
     }
   };
 
-  const stop = () => {
-    try {
-      controlsRef.current?.stop();
-    } catch {}
-    controlsRef.current = null;
-    setIsRunning(false);
+  const confirm = () => {
+    if (!candidate) return;
+    onCode(candidate);
+  };
+
+  const resume = () => {
+    setCandidate(null);
+    lastReadRef.current = "";
+    stableCountRef.current = 0;
+    startScanner();
   };
 
   return (
     <div>
+      {/* INFO/DEBUG leggero */}
       <div
         style={{
           marginBottom: 10,
@@ -146,12 +172,12 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           color: "var(--text)",
         }}
       >
-        <div style={{ fontWeight: 800 }}>DEBUG ZXING</div>
-        <div>Tick: {ticks}</div>
-        <div>Formato: {lastFormat}</div>
-        <div>Letto: {lastText}</div>
+        <div style={{ fontWeight: 800 }}>Scanner (modalità conferma)</div>
         <div style={{ color: "var(--muted)" }}>
-          Tip: per OTC/cosmetici cerca il barcode lineare (EAN/Code39/Code128).
+          Metti il codice nel riquadro e tieni fermo 1–2 sec. Poi premi “Conferma”.
+        </div>
+        <div style={{ marginTop: 6, color: "var(--muted)" }}>
+          Tick: {ticks} — last fmt: {lastFmt}
         </div>
       </div>
 
@@ -172,8 +198,10 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
         </div>
       )}
 
+      {/* Camera + mirino */}
       <div
         style={{
+          position: "relative",
           border: "1px solid var(--border)",
           borderRadius: 12,
           overflow: "hidden",
@@ -187,12 +215,26 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           playsInline
           autoPlay
         />
+
+        {/* mirino */}
+        <div
+          style={{
+            position: "absolute",
+            left: "12%",
+            top: "35%",
+            width: "76%",
+            height: "30%",
+            border: "2px dashed rgba(255,255,255,0.8)",
+            borderRadius: 12,
+            pointerEvents: "none",
+          }}
+        />
       </div>
 
       <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-        {!isRunning ? (
+        {!isRunning && !candidate && (
           <button
-            onClick={start}
+            onClick={startScanner}
             style={{
               width: "100%",
               padding: 12,
@@ -207,9 +249,11 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           >
             Avvia scanner
           </button>
-        ) : (
+        )}
+
+        {isRunning && (
           <button
-            onClick={stop}
+            onClick={stopScanner}
             style={{
               width: "100%",
               padding: 12,
@@ -224,6 +268,64 @@ export function ScannerView({ onCode }: { onCode: (code: string) => void }) {
           >
             Ferma scanner
           </button>
+        )}
+
+        {/* candidato */}
+        {candidate && (
+          <div
+            style={{
+              padding: 12,
+              borderRadius: 12,
+              border: "1px solid var(--border)",
+              background: "#fff",
+            }}
+          >
+            <div style={{ fontWeight: 800, color: "var(--primary)" }}>
+              Codice rilevato
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 900, marginTop: 6 }}>
+              {candidate}
+            </div>
+            <div style={{ color: "var(--muted)", marginTop: 4 }}>
+              Se non è quello giusto, premi “Riprendi scansione”.
+            </div>
+
+            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+              <button
+                onClick={confirm}
+                style={{
+                  width: "100%",
+                  padding: 12,
+                  borderRadius: 12,
+                  border: "2px solid var(--primary)",
+                  background: "var(--primary)",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 16,
+                  cursor: "pointer",
+                }}
+              >
+                Conferma codice
+              </button>
+
+              <button
+                onClick={resume}
+                style={{
+                  width: "100%",
+                  padding: 12,
+                  borderRadius: 12,
+                  border: "2px solid var(--primary)",
+                  background: "#fff",
+                  color: "var(--primary)",
+                  fontWeight: 800,
+                  fontSize: 16,
+                  cursor: "pointer",
+                }}
+              >
+                Riprendi scansione
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>
